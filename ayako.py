@@ -7,6 +7,11 @@ import yt_dlp
 import asyncio
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
+from collections import defaultdict, deque
+
+# Per-guild music queues
+music_queues = defaultdict(deque)
+
 
 load_dotenv()
 
@@ -55,19 +60,34 @@ def get_youtube_url(query):
 
         raise Exception("No valid YouTube result found.")
 
+import asyncio
+
+async def start_idle_timer(vc: discord.VoiceClient, source):
+    await asyncio.sleep(300)  # 5 minutes
+    if not vc.is_playing():
+        try:
+            await vc.disconnect()
+            if isinstance(source, discord.Interaction):
+                await source.followup.send("Disconnected due to inactivity.")
+            else:
+                await source.send("Disconnected due to inactivity.")
+        except Exception as e:
+            print(f"Error during auto-disconnect: {e}")
 
 
 async def play_audio(source, url):
-    # Determine voice client from type
     if isinstance(source, discord.Interaction):
+        guild_id = source.guild.id
         voice_client = source.guild.voice_client
         author_voice = source.user.voice
         send = source.followup.send
-    else:  # assuming commands.Context
+    else:
+        guild_id = source.guild.id
         voice_client = source.voice_client
         author_voice = source.author.voice
         send = source.send
 
+    # Join voice if not already connected
     if voice_client is None:
         if author_voice:
             vc = await author_voice.channel.connect()
@@ -77,21 +97,39 @@ async def play_audio(source, url):
     else:
         vc = voice_client
 
+    # Add to queue
+    music_queues[guild_id].append(url)
+
+    # If nothing is playing, start the player
     if not vc.is_playing():
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'quiet': True,
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            audio_url = info['url']
-
-        vc.play(discord.FFmpegPCMAudio(audio_url), after=lambda e: print("Playback finished"))
-
-        await send(f"Now playing: **{info.get('title', 'Unknown Title')}**")
+        await play_next_in_queue(vc, source)
     else:
-        await send("Already playing audio.")
+        await send("Added to the queue!")
+
+async def play_next_in_queue(vc: discord.VoiceClient, source):
+    guild_id = source.guild.id
+
+    if not music_queues[guild_id]:
+        await asyncio.sleep(300)  # 5 minute auto-leave
+        if not vc.is_playing():
+            await vc.disconnect()
+        return
+
+    next_url = music_queues[guild_id].popleft()
+
+    ydl_opts = {'format': 'bestaudio', 'quiet': True}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(next_url, download=False)
+        audio_url = info['url']
+        title = info.get('title', 'Unknown Title')
+
+    vc.play(discord.FFmpegPCMAudio(audio_url), after=lambda e: asyncio.run_coroutine_threadsafe(play_next_in_queue(vc, source), bot.loop))
+
+    if isinstance(source, discord.Interaction):
+        await source.followup.send(f"Now playing: **{title}**")
+    else:
+        await source.send(f"Now playing: **{title}**")
+
 
 
 # --- Slash Command Version ---
@@ -104,6 +142,46 @@ async def slash_play(interaction: discord.Interaction, query: str):
         query = f"{track['name']} {track['artists'][0]['name']}"
     yt_url = get_youtube_url(query)
     await play_audio(interaction, yt_url)
+@tree.command(name="stop", description="Stop playing music and disconnect from voice channel")
+async def slash_stop(interaction: discord.Interaction):
+    voice_client = interaction.guild.voice_client
+
+    if not voice_client or not voice_client.is_connected():
+        await interaction.response.send_message("I'm not connected to a voice channel.", ephemeral=True)
+        return
+
+    await voice_client.disconnect()
+    await interaction.response.send_message("Disconnected from the voice channel.")
+@tree.command(name="pause", description="Pause the current track")
+async def slash_pause(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if vc and vc.is_playing():
+        vc.pause()
+        await interaction.response.send_message("Playback paused.")
+    else:
+        await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+
+@tree.command(name="resume", description="Resume paused music")
+async def slash_resume(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if vc and vc.is_paused():
+        vc.resume()
+        await interaction.response.send_message("Resumed playback.")
+    else:
+        await interaction.response.send_message("Nothing is paused.", ephemeral=True)
+@tree.command(name="queue", description="Show the current music queue")
+async def slash_queue(interaction: discord.Interaction):
+    guild_id = interaction.guild.id
+    queue = list(music_queues[guild_id])
+    if not queue:
+        await interaction.response.send_message("The queue is empty.", ephemeral=True)
+    else:
+        formatted = "\n".join(f"{i+1}. {url}" for i, url in enumerate(queue))
+        await interaction.response.send_message(f"**Current Queue:**\n{formatted}")
+
+
+
+
 
 # --- Prefix Version ---
 @bot.command(name="play")
