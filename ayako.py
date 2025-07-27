@@ -204,5 +204,6 @@ async def stop_command(ctx):
 async def on_ready():
     await tree.sync()
     print(f"Logged in as {bot.user.name}")
+    print("successfully finished startup")
 
 bot.run(TOKEN)
