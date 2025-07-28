@@ -38,6 +38,7 @@ def get_youtube_url(query):
         'quiet': True,
         'default_search': 'ytsearch',
         'extract_flat': 'in_playlist',
+        'cookiefile': 'youtube_cookies.txt',
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
